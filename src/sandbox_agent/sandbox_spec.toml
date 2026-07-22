@@ -3,17 +3,11 @@ capabilities = [
   "network",
   "mcp_client",
   "openai_agents",
-  "ollama",
 ]
 
 [squid_proxy]
 allowed_domains = []
 allowed_ip_addresses = []
-
-[ollama_sidecar]
-models = [
-  "qwen3:0.6b",
-]
 
 [mcp_sidecar]
 tools = [

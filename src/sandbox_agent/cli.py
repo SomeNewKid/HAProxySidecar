@@ -9,7 +9,7 @@ from docker_sandbox.container_guard import (
     ensure_running_in_docker_sandbox,
     is_running_in_docker_sandbox,
 )
-from sandbox_agent.openai_agent import run_ollama_smoke_agent
+from sandbox_agent.openai_agent import run_html_element_agent
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,5 +23,5 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_running_in_docker_sandbox()
 
-    print(run_ollama_smoke_agent())
+    print(run_html_element_agent())
     return 0
