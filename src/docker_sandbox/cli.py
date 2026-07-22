@@ -186,6 +186,7 @@ def _configuration_from_arguments(
         enabled_capabilities=frozenset(spec.capabilities),
         mcp_sidecar_tools=spec.mcp_sidecar_tools,
         mcp_sidecar_resources=spec.mcp_sidecar_resources,
+        haproxy=spec.haproxy,
         ollama_models=spec.ollama_models,
         ollama_image_name=spec.ollama_image_name,
     )

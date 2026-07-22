@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
-from typing import Any
+from typing import Any, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from .audit import write_mcp_audit_record
 
+_GET_ACTIVE_ITEMS_TOOL_NAME = "get_active_items"
 _MICROSOFT_LEARN_MCP_URL_ENVIRONMENT_VARIABLE = "MICROSOFT_LEARN_MCP_URL"
 _DEFAULT_MICROSOFT_LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
 _MICROSOFT_DOCS_SEARCH_TOOL_NAME = "microsoft_docs_search"
@@ -25,6 +27,27 @@ _DEFAULT_JINA_READER_URL = "http://jina-reader:8081"
 _DEFAULT_CODE_SIDECAR_URL = "http://code-sidecar:8090"
 _JINA_READER_TIMEOUT_SECONDS = 60.0
 _CODE_SIDECAR_TIMEOUT_BUFFER_SECONDS = 2.0
+_MARIADB_HOST_ENVIRONMENT_VARIABLE = "MARIADB_HOST"
+_MARIADB_PORT_ENVIRONMENT_VARIABLE = "MARIADB_PORT"
+_MARIADB_DATABASE_ENVIRONMENT_VARIABLE = "MARIADB_DATABASE"
+_MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE = "SANDBOX_TESTER_MARIADB_CREDENTIALS"
+_DEFAULT_MARIADB_HOST = "haproxy-sidecar"
+_DEFAULT_MARIADB_PORT = 3306
+_DEFAULT_MARIADB_DATABASE = "agent_allowed"
+_ACTIVE_ITEMS_QUERY = """
+SELECT id, item_key, title, status, notes, quantity, created_at, updated_at
+FROM items
+WHERE status = 'active'
+ORDER BY id
+"""
+
+
+class _MariaDBConnectionSettings(TypedDict):
+    host: str
+    port: int
+    user: str
+    password: str
+    database: str
 
 
 def get_html_element_name() -> str:
@@ -83,6 +106,29 @@ async def jina_read_url(url: str) -> str:
     return result
 
 
+async def get_active_items() -> str:
+    """Return active items from the configured MariaDB database."""
+    arguments: dict[str, object] = _build_active_items_audit_arguments()
+    try:
+        result = await asyncio.to_thread(_get_active_items_sync)
+    except Exception as error:
+        write_mcp_audit_record(
+            "tool",
+            _GET_ACTIVE_ITEMS_TOOL_NAME,
+            arguments,
+            error=error,
+        )
+        raise
+
+    write_mcp_audit_record(
+        "tool",
+        _GET_ACTIVE_ITEMS_TOOL_NAME,
+        arguments,
+        result=result,
+    )
+    return result
+
+
 async def run_python_script(
     script: str,
     args: list[str] | None = None,
@@ -123,6 +169,110 @@ async def run_python_script(
         result=result_text,
     )
     return result
+
+
+def _get_active_items_sync() -> str:
+    connection_settings = _read_mariadb_connection_settings()
+    connection = _connect_to_mariadb(connection_settings)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(_ACTIVE_ITEMS_QUERY)
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    normalized_rows = [_normalize_database_row(row) for row in rows]
+    return json.dumps(normalized_rows, sort_keys=True, default=str)
+
+
+def _read_mariadb_connection_settings() -> _MariaDBConnectionSettings:
+    username, password = _read_mariadb_credentials()
+    return {
+        "host": os.environ.get(
+            _MARIADB_HOST_ENVIRONMENT_VARIABLE,
+            _DEFAULT_MARIADB_HOST,
+        ),
+        "port": _read_mariadb_port(),
+        "user": username,
+        "password": password,
+        "database": os.environ.get(
+            _MARIADB_DATABASE_ENVIRONMENT_VARIABLE,
+            _DEFAULT_MARIADB_DATABASE,
+        ),
+    }
+
+
+def _read_mariadb_credentials() -> tuple[str, str]:
+    value = os.environ.get(_MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE)
+    if value is None:
+        raise RuntimeError(
+            f"{_MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE} is not configured."
+        )
+
+    username, separator, password = value.partition(",")
+    if not separator or not username.strip() or not password:
+        raise RuntimeError(
+            f"{_MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE} must use "
+            "the format 'username,password'."
+        )
+
+    return username.strip(), password
+
+
+def _read_mariadb_port() -> int:
+    value = os.environ.get(_MARIADB_PORT_ENVIRONMENT_VARIABLE)
+    if value is None:
+        return _DEFAULT_MARIADB_PORT
+
+    try:
+        port = int(value)
+    except ValueError as error:
+        raise RuntimeError("MARIADB_PORT must be an integer TCP port.") from error
+
+    if port < 1 or port > 65535:
+        raise RuntimeError("MARIADB_PORT must be between 1 and 65535.")
+
+    return port
+
+
+def _connect_to_mariadb(connection_settings: _MariaDBConnectionSettings) -> Any:
+    pymysql: Any = importlib.import_module("pymysql")
+
+    return pymysql.connect(
+        host=connection_settings["host"],
+        port=connection_settings["port"],
+        user=connection_settings["user"],
+        password=connection_settings["password"],
+        database=connection_settings["database"],
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=5,
+        read_timeout=10,
+        write_timeout=10,
+    )
+
+
+def _normalize_database_row(row: object) -> dict[str, object]:
+    if isinstance(row, dict):
+        return dict(row)
+
+    raise RuntimeError("MariaDB query returned an unexpected row shape.")
+
+
+def _build_active_items_audit_arguments() -> dict[str, object]:
+    return {
+        "host": os.environ.get(
+            _MARIADB_HOST_ENVIRONMENT_VARIABLE,
+            _DEFAULT_MARIADB_HOST,
+        ),
+        "port": os.environ.get(
+            _MARIADB_PORT_ENVIRONMENT_VARIABLE,
+            str(_DEFAULT_MARIADB_PORT),
+        ),
+        "database": os.environ.get(
+            _MARIADB_DATABASE_ENVIRONMENT_VARIABLE,
+            _DEFAULT_MARIADB_DATABASE,
+        ),
+    }
 
 
 def _read_jina_url_sync(url: str) -> str:

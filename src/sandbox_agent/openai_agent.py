@@ -12,18 +12,18 @@ _OUTPUT_DIRECTORY = Path("/sandbox-output")
 _SITE_DIRECTORY = _OUTPUT_DIRECTORY / "site"
 _DEFAULT_MODEL = "gpt-4.1-mini"
 _AGENT_PROMPT = """
-Create a single basic-style HTML document named index.html that explains the
-HTML element returned by the get_html_element_name tool to a new developer at a
-middle-school student level.
+Create a single basic-style HTML document named index.html that lists the active
+items returned by the get_active_items tool.
 
-Use the get_html_element_name tool first. Then write a friendly, self-contained
-page about that element. Include what the element is for, a tiny example, and a
-short note about when to use it. Use embedded CSS in a <style> block so the page
-is readable and pleasant, but keep the design simple.
+Use the get_active_items tool first. Treat its response as a JSON array of item
+records. Build a friendly, self-contained page that summarizes the active items
+and shows their id, item_key, title, status, notes, quantity, created_at, and
+updated_at values. Use embedded CSS in a <style> block so the page is readable
+and pleasant, but keep the design simple.
 
 Save the document with the save_html_document tool. After saving index.html,
 save a short status message with the save_answer tool. The status message should
-say which file was created and which HTML element it explains.
+say which file was created and how many active items it lists.
 """
 
 
@@ -32,22 +32,22 @@ def create_openai_agent(model: str = _DEFAULT_MODEL) -> Agent:
     from agents import Agent
 
     from .openai_tools import (
-        get_html_element_name_tool,
+        get_active_items_tool,
         save_answer_tool,
         save_html_document_tool,
     )
 
     return Agent(
-        name="HTML Element Document Generator",
+        name="Active Items Document Generator",
         model=model,
         instructions=(
             "You are a careful web page builder. Use the provided tools to "
-            "retrieve the required HTML element, save exactly one HTML file, "
+            "retrieve the active item records, save exactly one HTML file, "
             "and save the final status message. Do not finish until all three "
             "tool calls have succeeded."
         ),
         tools=[
-            get_html_element_name_tool,
+            get_active_items_tool,
             save_html_document_tool,
             save_answer_tool,
         ],

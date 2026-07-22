@@ -238,6 +238,18 @@ def test_mcp_sidecar_exposure_supports_tools_and_resources(
     }
 
 
+def test_default_sandbox_spec_exposes_active_items_tool() -> None:
+    """Verify the default sandbox spec exposes the MariaDB MCP tool."""
+    spec_path = Path("src") / "sandbox_agent" / "sandbox_spec.toml"
+
+    spec = load_sandbox_spec(spec_path)
+
+    assert spec.mcp_sidecar_tools == (
+        "get_html_element_name",
+        "get_active_items",
+    )
+
+
 def test_mcp_sidecar_exposure_rejects_unknown_keys(tmp_path: Path) -> None:
     """Verify MCP sidecar exposure fails closed for unsupported spec keys."""
     spec_path = tmp_path / "sandbox_spec.toml"
@@ -429,6 +441,224 @@ def test_jina_reader_capability_requires_network(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="requires the network capability"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_capability_requires_network(tmp_path: Path) -> None:
+    """Verify HAProxy sidecar support requires the internal Docker network."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                'backend_host = "host.docker.internal"',
+                "ports = [3306]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="requires the network capability"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_settings_are_loaded_from_spec(tmp_path: Path) -> None:
+    """Verify HAProxy settings are carried by the sandbox spec."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                'backend_host = "host.docker.internal"',
+                "ports = [3306, 5432]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_sandbox_spec(spec_path)
+
+    assert spec.has_capability("haproxy") is True
+    assert spec.haproxy is not None
+    assert spec.haproxy.backend_host == "host.docker.internal"
+    assert spec.haproxy.ports == (3306, 5432)
+    assert spec.to_dict()["haproxy"] == {
+        "backend_host": "host.docker.internal",
+        "ports": [3306, 5432],
+    }
+
+
+def test_haproxy_backend_host_defaults_to_docker_host(tmp_path: Path) -> None:
+    """Verify the host convention keeps common MariaDB specs small."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = [3306]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_sandbox_spec(spec_path)
+
+    assert spec.haproxy is not None
+    assert spec.haproxy.backend_host == "host.docker.internal"
+    assert spec.haproxy.ports == (3306,)
+
+
+def test_haproxy_capability_requires_table(tmp_path: Path) -> None:
+    """Verify HAProxy cannot be enabled without explicit proxy settings."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"requires \[haproxy\]"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_requires_non_empty_ports(tmp_path: Path) -> None:
+    """Verify HAProxy ports must be deliberately declared."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-empty list"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_rejects_duplicate_ports(tmp_path: Path) -> None:
+    """Verify duplicate HAProxy ports fail closed."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = [3306, 3306]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate haproxy port"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_rejects_invalid_ports(tmp_path: Path) -> None:
+    """Verify HAProxy ports must be valid TCP ports."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = [0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_rejects_unknown_keys(tmp_path: Path) -> None:
+    """Verify HAProxy settings fail closed for unsupported keys."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = [3306]",
+                'mode = "tcp"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported haproxy key"):
+        load_sandbox_spec(spec_path)
+
+
+def test_haproxy_table_requires_capability(tmp_path: Path) -> None:
+    """Verify HAProxy config cannot silently enable the sidecar."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                "ports = [3306]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="requires the haproxy capability"):
         load_sandbox_spec(spec_path)
 
 
@@ -732,6 +962,48 @@ def test_ollama_configuration_is_carried_into_docker_configuration(
     assert configuration.resolved_spec["ollama_image_name"] == (
         configuration.ollama_image_name
     )
+
+
+def test_haproxy_configuration_is_carried_into_docker_configuration(
+    tmp_path: Path,
+) -> None:
+    """Verify HAProxy settings flow from spec into Docker configuration."""
+    spec_path = tmp_path / "sandbox_spec.toml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                'capabilities = ["network", "haproxy"]',
+                "[squid_proxy]",
+                "allowed_domains = []",
+                "allowed_ip_addresses = []",
+                "",
+                "[haproxy]",
+                'backend_host = "host.docker.internal"',
+                "ports = [3306, 5432]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    arguments = argparse.Namespace(
+        base_directory=tmp_path / "docker",
+        dockerfile=Path("src") / "docker_sandbox" / "dockerfile" / "Dockerfile",
+        guest_user="sandbox",
+        profile=None,
+        sandbox_spec=spec_path,
+        test_sandbox=False,
+    )
+
+    configuration = _configuration_from_arguments(arguments)
+
+    assert configuration.haproxy is not None
+    assert configuration.haproxy.backend_host == "host.docker.internal"
+    assert configuration.haproxy.ports == (3306, 5432)
+    assert configuration.resolved_spec is not None
+    assert configuration.resolved_spec["haproxy"] == {
+        "backend_host": "host.docker.internal",
+        "ports": [3306, 5432],
+    }
 
 
 def test_anthropic_python_capability_requires_network(tmp_path: Path) -> None:

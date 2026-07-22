@@ -26,6 +26,14 @@ class NetworkGatewayProfile:
 
 
 @dataclass(frozen=True)
+class HAProxyConfiguration:
+    """HAProxy sidecar settings resolved from the sandbox spec."""
+
+    backend_host: str
+    ports: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class NetworkDnsPolicy:
     """DNS and Docker host-name hardening for a Docker profile."""
 
@@ -284,6 +292,7 @@ class DockerConfiguration:
     enabled_capabilities: frozenset[str] = frozenset()
     mcp_sidecar_tools: tuple[str, ...] = ()
     mcp_sidecar_resources: tuple[str, ...] = ()
+    haproxy: HAProxyConfiguration | None = None
     ollama_models: tuple[str, ...] = ()
     ollama_image_name: str | None = None
 
@@ -325,6 +334,9 @@ class DockerRunResult:
     code_sidecar_container_name: str | None = None
     code_sidecar_commands: list[list[str]] | None = None
     code_sidecar_cleanup_commands: list[list[str]] | None = None
+    haproxy_sidecar_container_name: str | None = None
+    haproxy_sidecar_commands: list[list[str]] | None = None
+    haproxy_sidecar_cleanup_commands: list[list[str]] | None = None
     ollama_sidecar_container_name: str | None = None
     ollama_sidecar_commands: list[list[str]] | None = None
     ollama_sidecar_cleanup_commands: list[list[str]] | None = None
@@ -349,6 +361,8 @@ class DockerRunResult:
             cleanup_commands.extend(self.jina_reader_cleanup_commands)
         if self.code_sidecar_cleanup_commands is not None:
             cleanup_commands.extend(self.code_sidecar_cleanup_commands)
+        if self.haproxy_sidecar_cleanup_commands is not None:
+            cleanup_commands.extend(self.haproxy_sidecar_cleanup_commands)
         if self.ollama_sidecar_cleanup_commands is not None:
             cleanup_commands.extend(self.ollama_sidecar_cleanup_commands)
         cleanup_commands.extend(self.gateway_cleanup_commands)

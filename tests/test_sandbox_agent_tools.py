@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sandbox_agent.tools import (
+    get_active_items,
     get_answer_format,
     get_html_element_name,
     jina_read_url,
@@ -73,6 +74,21 @@ def test_get_html_element_name_requires_mcp_sidecar_url(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="MCP_SIDECAR_URL"):
         get_html_element_name()
+
+
+def test_get_active_items_calls_mcp_sidecar(monkeypatch) -> None:
+    """Verify active item lookups call the sidecar wrapper tool."""
+    calls = []
+
+    def fake_call(tool_name: str, arguments: dict[str, object]) -> str:
+        calls.append((tool_name, arguments))
+        return '[{"id": 2, "status": "active"}]'
+
+    monkeypatch.setenv("MCP_SIDECAR_URL", "http://mcp-sidecar:8000/mcp")
+    monkeypatch.setattr("sandbox_agent.tools._call_mcp_sidecar_tool", fake_call)
+
+    assert get_active_items() == '[{"id": 2, "status": "active"}]'
+    assert calls == [("get_active_items", {})]
 
 
 def test_microsoft_docs_search_calls_mcp_sidecar(monkeypatch) -> None:

@@ -7,7 +7,11 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
-from docker_sandbox.models import DockerConfiguration, NetworkGatewayProfile
+from docker_sandbox.models import (
+    DockerConfiguration,
+    HAProxyConfiguration,
+    NetworkGatewayProfile,
+)
 from docker_sandbox.profiles import MINIMAL_PROFILE_NAME, get_docker_profile
 from docker_sandbox.sandbox_container import (
     _build_code_sidecar_cleanup_commands,
@@ -17,6 +21,10 @@ from docker_sandbox.sandbox_container import (
     _build_code_sidecar_run_command,
     _build_container_environment,
     _build_docker_run_command,
+    _build_haproxy_sidecar_cleanup_commands,
+    _build_haproxy_sidecar_container_name,
+    _build_haproxy_sidecar_network_connect_command,
+    _build_haproxy_sidecar_run_command,
     _build_jina_reader_cleanup_commands,
     _build_jina_reader_container_name,
     _build_jina_reader_run_command,
@@ -32,12 +40,17 @@ from docker_sandbox.sandbox_container import (
     _build_ollama_sidecar_models_probe_script,
     _build_ollama_sidecar_run_command,
     _build_ollama_sidecar_tcp_probe_script,
+    _generate_haproxy_configuration,
     _generate_ollama_sidecar_dockerfile,
+    _start_haproxy_sidecar,
     _start_jina_reader,
+    _start_mcp_sidecar,
     _start_ollama_sidecar,
     _wait_for_jina_reader_ready,
     _wait_for_ollama_sidecar_ready,
     _write_code_sidecar_logs,
+    _write_haproxy_configuration,
+    _write_haproxy_sidecar_logs,
     _write_jina_reader_logs,
     _write_mcp_sidecar_exposure,
     _write_mcp_sidecar_logs,
@@ -131,6 +144,30 @@ def test_code_sidecar_container_name_is_omitted_without_capability() -> None:
     assert container_name is None
 
 
+def test_haproxy_sidecar_container_name_is_created_for_agent_network_runs() -> None:
+    """Verify haproxy runs get an HAProxy sidecar container."""
+    configuration = _create_haproxy_configuration()
+
+    container_name = _build_haproxy_sidecar_container_name(
+        configuration,
+        "2026-07-20-16-00-00",
+    )
+
+    assert container_name == "haproxy-sidecar-2026-07-20-16-00-00"
+
+
+def test_haproxy_sidecar_container_name_is_omitted_without_capability() -> None:
+    """Verify network access alone does not get an HAProxy sidecar container."""
+    configuration = _create_network_configuration()
+
+    container_name = _build_haproxy_sidecar_container_name(
+        configuration,
+        "2026-07-20-16-00-00",
+    )
+
+    assert container_name is None
+
+
 def test_ollama_sidecar_container_name_is_created_for_agent_network_runs(
     tmp_path: Path,
 ) -> None:
@@ -178,10 +215,12 @@ def test_mcp_sidecar_run_command_uses_internal_network_and_proxy() -> None:
         command,
         "--env",
     )
-    no_proxy_values = _option_values(command, "--env")
+    env_values = _option_values(command, "--env")
     assert "NO_PROXY=localhost,127.0.0.1,mcp-sidecar,jina-reader,code-sidecar" in (
-        no_proxy_values
+        env_values
     )
+    assert not any(value.startswith("MARIADB_") for value in env_values)
+    assert "SANDBOX_TESTER_MARIADB_CREDENTIALS" not in env_values
     assert "JINA_READER_URL=http://jina-reader:8081" in _option_values(
         command,
         "--env",
@@ -214,6 +253,58 @@ def test_mcp_sidecar_run_command_uses_internal_network_and_proxy() -> None:
         "--port",
         "8000",
     ]
+
+
+def test_mcp_sidecar_run_command_includes_database_env_only_for_haproxy() -> None:
+    """Verify only the MCP sidecar receives MariaDB settings through HAProxy."""
+    command = _build_mcp_sidecar_run_command(
+        _create_haproxy_configuration(),
+        Path(".docker_sandbox") / "runs" / "run-1",
+        "sandbox-agent-net-1",
+        "mcp-sidecar-1",
+    )
+
+    env_values = _option_values(command, "--env")
+    assert (
+        "NO_PROXY=localhost,127.0.0.1,mcp-sidecar,jina-reader,code-sidecar,haproxy-sidecar"
+        in (env_values)
+    )
+    assert "MARIADB_HOST=haproxy-sidecar" in env_values
+    assert "MARIADB_PORT=3306" in env_values
+    assert "MARIADB_DATABASE=agent_allowed" in env_values
+    assert "SANDBOX_TESTER_MARIADB_CREDENTIALS" in env_values
+    assert "MARIADB_USER" not in env_values
+    assert not any("sandbox_tester.secret" in value for value in env_values)
+
+
+def test_mcp_sidecar_database_env_prefers_mariadb_port() -> None:
+    """Verify MCP uses port 3306 when HAProxy exposes multiple ports."""
+    configuration = _create_haproxy_configuration(ports=(5432, 3306))
+
+    command = _build_mcp_sidecar_run_command(
+        configuration,
+        Path(".docker_sandbox") / "runs" / "run-1",
+        "sandbox-agent-net-1",
+        "mcp-sidecar-1",
+    )
+
+    env_values = _option_values(command, "--env")
+    assert "MARIADB_PORT=3306" in env_values
+
+
+def test_mcp_sidecar_database_env_falls_back_to_first_haproxy_port() -> None:
+    """Verify non-MariaDB HAProxy configs still produce one MCP port value."""
+    configuration = _create_haproxy_configuration(ports=(5432,))
+
+    command = _build_mcp_sidecar_run_command(
+        configuration,
+        Path(".docker_sandbox") / "runs" / "run-1",
+        "sandbox-agent-net-1",
+        "mcp-sidecar-1",
+    )
+
+    env_values = _option_values(command, "--env")
+    assert "MARIADB_PORT=5432" in env_values
 
 
 def test_jina_reader_run_command_uses_internal_network_and_proxy() -> None:
@@ -288,6 +379,48 @@ def test_code_sidecar_run_command_uses_internal_network_without_proxy() -> None:
     ]
 
 
+def test_haproxy_sidecar_run_command_uses_internal_network(
+    tmp_path: Path,
+) -> None:
+    """Verify HAProxy starts on the internal Docker network with a mounted config."""
+    command = _build_haproxy_sidecar_run_command(
+        tmp_path,
+        "haproxy-sidecar-1",
+    )
+
+    assert command[:4] == ["docker", "run", "--detach", "--name"]
+    assert "haproxy-sidecar-1" in command
+    assert _option_value(command, "--network") == "bridge"
+    assert _option_value(command, "--add-host") == "host.docker.internal:host-gateway"
+    assert _option_values(command, "--mount") == [
+        (
+            f"type=bind,source={tmp_path / 'haproxy.cfg'},"
+            "target=/usr/local/etc/haproxy/haproxy.cfg,readonly"
+        )
+    ]
+    assert command[-1] == "haproxy:latest"
+    assert "--publish" not in command
+    assert "-p" not in command
+
+
+def test_haproxy_sidecar_network_connect_command_adds_internal_alias() -> None:
+    """Verify HAProxy joins the internal network under the sidecar alias."""
+    command = _build_haproxy_sidecar_network_connect_command(
+        "sandbox-agent-net-1",
+        "haproxy-sidecar-1",
+    )
+
+    assert command == [
+        "docker",
+        "network",
+        "connect",
+        "--alias",
+        "haproxy-sidecar",
+        "sandbox-agent-net-1",
+        "haproxy-sidecar-1",
+    ]
+
+
 def test_ollama_sidecar_run_command_uses_internal_network(
     tmp_path: Path,
 ) -> None:
@@ -326,6 +459,63 @@ def test_mcp_sidecar_image_commands_use_static_dockerfile() -> None:
         "mcp-sidecar:dev",
         ".",
     ]
+
+
+def test_start_mcp_sidecar_rebuilds_image_before_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify MCP startup refreshes the dev image before running the sidecar."""
+    configuration = _create_network_configuration()
+    calls = []
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        assert encoding == "utf-8"
+        assert errors == "replace"
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    commands = _start_mcp_sidecar(
+        configuration,
+        tmp_path,
+        "sandbox-agent-net-1",
+        "mcp-sidecar-1",
+    )
+
+    expected_commands = [
+        _build_mcp_sidecar_image_inspect_command(),
+        _build_mcp_sidecar_image_build_command(configuration),
+        _build_mcp_sidecar_run_command(
+            configuration,
+            tmp_path,
+            "sandbox-agent-net-1",
+            "mcp-sidecar-1",
+        ),
+    ]
+    start_results = json.loads(
+        (tmp_path / "mcp-sidecar-start-results.json").read_text()
+    )
+
+    assert commands == expected_commands
+    assert calls == expected_commands
+    assert [result["command"] for result in start_results] == expected_commands
 
 
 def test_code_sidecar_image_commands_use_static_dockerfile() -> None:
@@ -401,6 +591,34 @@ def test_ollama_sidecar_dockerfile_quotes_model_names() -> None:
     assert "ollama pull 'custom model:latest';" in dockerfile
 
 
+def test_haproxy_configuration_proxies_declared_ports() -> None:
+    """Verify HAProxy config maps each listen port to the same backend port."""
+    config = _generate_haproxy_configuration(
+        "host.docker.internal",
+        (3306, 5432),
+    )
+
+    assert "mode tcp" in config
+    assert "frontend tcp_3306" in config
+    assert "bind *:3306" in config
+    assert "default_backend backend_3306" in config
+    assert "server host host.docker.internal:3306" in config
+    assert "frontend tcp_5432" in config
+    assert "bind *:5432" in config
+    assert "server host host.docker.internal:5432" in config
+
+
+def test_write_haproxy_configuration_writes_run_artifact(tmp_path: Path) -> None:
+    """Verify HAProxy config is generated inside the run directory."""
+    configuration = _create_haproxy_configuration()
+
+    _write_haproxy_configuration(configuration, tmp_path)
+
+    config = (tmp_path / "haproxy.cfg").read_text(encoding="utf-8")
+    assert "bind *:3306" in config
+    assert "server host host.docker.internal:3306" in config
+
+
 def test_write_ollama_sidecar_dockerfile_uses_image_tag_directory(
     tmp_path: Path,
 ) -> None:
@@ -455,6 +673,18 @@ def test_code_sidecar_cleanup_removes_sidecar_before_network_cleanup() -> None:
     assert cleanup_commands == [["docker", "rm", "--force", "code-sidecar-1"]]
 
 
+def test_haproxy_sidecar_cleanup_removes_sidecar_before_network_cleanup() -> None:
+    """Verify HAProxy sidecar cleanup removes the sidecar container."""
+    configuration = _create_haproxy_configuration()
+
+    cleanup_commands = _build_haproxy_sidecar_cleanup_commands(
+        configuration,
+        "haproxy-sidecar-1",
+    )
+
+    assert cleanup_commands == [["docker", "rm", "--force", "haproxy-sidecar-1"]]
+
+
 def test_ollama_sidecar_cleanup_removes_sidecar_before_network_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -478,6 +708,23 @@ def test_agent_environment_includes_mcp_sidecar_url() -> None:
     assert environment["MCP_SIDECAR_URL"] == "http://mcp-sidecar:8000/mcp"
     assert "mcp-sidecar" in environment["NO_PROXY"].split(",")
     assert "mcp-sidecar" in environment["no_proxy"].split(",")
+
+
+def test_agent_environment_omits_database_settings_with_haproxy() -> None:
+    """Verify MariaDB settings are not passed into the AI agent container."""
+    configuration = _create_haproxy_configuration()
+
+    environment = _build_container_environment(
+        configuration,
+        {
+            "SANDBOX_TESTER_MARIADB_CREDENTIALS": "sandbox_tester.secret",
+        },
+    )
+
+    assert "MARIADB_HOST" not in environment
+    assert "MARIADB_PORT" not in environment
+    assert "MARIADB_DATABASE" not in environment
+    assert "SANDBOX_TESTER_MARIADB_CREDENTIALS" not in environment
 
 
 def test_agent_environment_omits_mcp_sidecar_url_without_network() -> None:
@@ -728,6 +975,47 @@ def test_write_ollama_sidecar_logs_persists_debug_artifacts(
     }
 
 
+def test_write_haproxy_sidecar_logs_persists_debug_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify HAProxy logs are persisted as text and metadata artifacts."""
+    configuration = _create_haproxy_configuration()
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command == ["docker", "logs", "haproxy-sidecar-1"]
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="haproxy stdout\n",
+            stderr="haproxy stderr\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _write_haproxy_sidecar_logs(configuration, tmp_path, "haproxy-sidecar-1")
+
+    metadata = json.loads((tmp_path / "haproxy-sidecar-metadata.json").read_text())
+    assert (tmp_path / "haproxy-sidecar-stdout.txt").read_text() == ("haproxy stdout\n")
+    assert (tmp_path / "haproxy-sidecar-stderr.txt").read_text() == ("haproxy stderr\n")
+    assert metadata == {
+        "container_name": "haproxy-sidecar-1",
+        "image_name": "haproxy:latest",
+        "backend_host": "host.docker.internal",
+        "ports": [3306],
+        "log_command": ["docker", "logs", "haproxy-sidecar-1"],
+        "log_returncode": 0,
+    }
+
+
 def test_start_jina_reader_persists_start_results(
     tmp_path: Path,
     monkeypatch,
@@ -782,6 +1070,75 @@ def test_start_jina_reader_persists_start_results(
             "stdout": "reader started\n",
             "stderr": "",
         }
+    ]
+
+
+def test_start_haproxy_sidecar_persists_start_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify HAProxy startup command results are persisted for debugging."""
+    configuration = _create_haproxy_configuration()
+    calls = []
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        assert encoding == "utf-8"
+        assert errors == "replace"
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="haproxy started\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    commands = _start_haproxy_sidecar(
+        configuration,
+        tmp_path,
+        "sandbox-agent-net-1",
+        "haproxy-sidecar-1",
+    )
+
+    start_results = json.loads(
+        (tmp_path / "haproxy-sidecar-start-results.json").read_text()
+    )
+    assert commands is not None
+    assert commands == [
+        _build_haproxy_sidecar_run_command(
+            tmp_path,
+            "haproxy-sidecar-1",
+        ),
+        _build_haproxy_sidecar_network_connect_command(
+            "sandbox-agent-net-1",
+            "haproxy-sidecar-1",
+        ),
+    ]
+    assert calls == commands
+    assert start_results == [
+        {
+            "command": commands[0],
+            "returncode": 0,
+            "stdout": "haproxy started\n",
+            "stderr": "",
+        },
+        {
+            "command": commands[1],
+            "returncode": 0,
+            "stdout": "haproxy started\n",
+            "stderr": "",
+        },
     ]
 
 
@@ -1124,6 +1481,20 @@ def _create_code_execution_configuration() -> DockerConfiguration:
     return replace(
         configuration,
         enabled_capabilities=frozenset({"code_execution"}),
+    )
+
+
+def _create_haproxy_configuration(
+    ports: tuple[int, ...] = (3306,),
+) -> DockerConfiguration:
+    configuration = _create_network_configuration()
+    return replace(
+        configuration,
+        enabled_capabilities=frozenset({"haproxy"}),
+        haproxy=HAProxyConfiguration(
+            backend_host="host.docker.internal",
+            ports=ports,
+        ),
     )
 
 

@@ -21,10 +21,10 @@ def test_create_openai_agent_uses_gpt_model_and_tools(monkeypatch) -> None:
 
     create_openai_agent()
 
-    assert calls[0]["name"] == "HTML Element Document Generator"
+    assert calls[0]["name"] == "Active Items Document Generator"
     assert calls[0]["model"] == "gpt-4.1-mini"
     assert calls[0]["tools"] == [
-        "tool:get_html_element_name",
+        "tool:get_active_items",
         "tool:save_html_document",
         "tool:save_answer",
     ]
@@ -75,7 +75,7 @@ def test_run_html_element_agent_lets_model_sequence_tool_calls(
                     "max_turns": max_turns,
                 }
             )
-            return SimpleNamespace(final_output="index.html was created for <table>.")
+            return SimpleNamespace(final_output="index.html lists 1 active item.")
 
     _install_fake_agent_dependencies(
         monkeypatch,
@@ -86,17 +86,18 @@ def test_run_html_element_agent_lets_model_sequence_tool_calls(
 
     result = run_html_element_agent()
 
-    assert result == "index.html was created for <table>."
+    assert result == "index.html lists 1 active item."
     assert (tmp_path / "site").exists()
     assert calls[0]["type"] == "agent"
     assert calls[0]["model"] == "gpt-4.1-mini"
     assert calls[0]["tools"] == [
-        "tool:get_html_element_name",
+        "tool:get_active_items",
         "tool:save_html_document",
         "tool:save_answer",
     ]
     assert calls[1]["type"] == "run"
-    assert "Use the get_html_element_name tool first." in calls[1]["prompt"]
+    assert "Use the get_active_items tool first." in calls[1]["prompt"]
+    assert "Treat its response as a JSON array" in calls[1]["prompt"]
     assert "Save the document with the save_html_document tool." in (calls[1]["prompt"])
     assert "save_answer tool" in calls[1]["prompt"]
     assert calls[1]["max_turns"] == 10
@@ -154,6 +155,7 @@ def _install_fake_agent_dependencies(
         Runner=runner,
     )
     fake_openai_tools_module = SimpleNamespace(
+        get_active_items_tool="tool:get_active_items",
         get_html_element_name_tool="tool:get_html_element_name",
         save_answer_tool="tool:save_answer",
         save_html_document_tool="tool:save_html_document",

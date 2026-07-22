@@ -1,18 +1,21 @@
-# OllamaSidecar
+# HAProxySidecar
 
-OllamaSidecar is a Python command-line project for running an OpenAI Agents SDK
-workload inside a hardened, disposable Docker sandbox with optional sidecar
-containers. This repository was copied from CodeSidecar and now focuses on one
-new capability: an Ollama sidecar that hosts small local models behind an
-OpenAI-compatible endpoint.
+HAProxySidecar is a Python command-line project for running an OpenAI Agents SDK
+workload inside a hardened, disposable Docker sandbox with supporting sidecar
+containers.
 
-The current default topology combines:
+The current focus is an HAProxy sidecar that lets the MCP sidecar reach a
+MariaDB database running on the Windows host, while keeping database connection
+details out of the AI agent container.
+
+The default topology combines:
 
 - a sandboxed AI agent container
 - a Squid proxy sidecar for controlled network egress
 - an MCP server sidecar that exposes only declared tools/resources
-- an Ollama sidecar that serves local models on the internal Docker network
-- optional sidecars such as Jina Reader and code execution for other workloads
+- an HAProxy sidecar that proxies MariaDB TCP traffic to the host
+- optional sidecars such as Jina Reader, code execution, and Ollama for other
+  workloads
 - a Docker internal network that lets containers communicate without exposing
   sidecars directly to the host
 
@@ -22,23 +25,32 @@ The current default topology combines:
 
 ## Current Workload
 
-The sample workload demonstrates Ollama, MCP, and the OpenAI Agents SDK working
-together locally.
+The sample workload demonstrates a hosted GPT model, MCP tool exposure, HAProxy,
+and a host MariaDB database working together.
 
 On each run, the sandbox agent:
 
-1. Calls the MCP sidecar function `get_html_element_name`, which currently
-   returns `<table>`.
-2. Uses the OpenAI Agents SDK with `qwen3:0.6b` hosted by the Ollama sidecar.
-3. Generates a simple HTML document explaining the returned element.
-4. Saves the document as `/sandbox-output/site/index.html`.
-5. Saves and prints a short status message in `/sandbox-output/answer.txt`.
+1. Calls the MCP sidecar tool `get_active_items`.
+2. The MCP sidecar connects to MariaDB through `haproxy-sidecar:3306`.
+3. HAProxy proxies that TCP connection to `host.docker.internal:3306`.
+4. The MCP tool queries `agent_allowed.items` for records where
+   `status = 'active'`.
+5. The GPT-backed agent generates a simple HTML document listing those active
+   items.
+6. The agent saves the document as `/sandbox-output/site/index.html`.
+7. The agent saves and prints a short status message in
+   `/sandbox-output/answer.txt`.
 
-The current implementation keeps orchestration deterministic. In testing,
-`qwen3:0.6b` handled text generation and simple constrained tool use, but was
-not reliable at autonomously sequencing multiple tool calls. The workload
-therefore calls MCP directly from Python, uses the local model for generation,
-and saves the generated document through the existing local save function.
+The agent uses the OpenAI Agents SDK with the default model configured in
+`src/sandbox_agent/openai_agent.py`:
+
+```text
+gpt-4.1-mini
+```
+
+The model is expected to make its own tool calls. The earlier local Ollama
+workaround, where Python pre-called tools and only asked the model to write
+HTML, is no longer the default path.
 
 ## Run
 
@@ -53,15 +65,15 @@ The host-side command:
 1. Loads `src/sandbox_agent/sandbox_spec.toml`.
 2. Validates the requested capabilities and sidecar configuration.
 3. Builds or reuses a hash-tagged Docker image for the agent container.
-4. Builds or reuses a separate hash-tagged Docker image for the Ollama sidecar.
-5. Builds or reuses the MCP sidecar image when `mcp_client` is enabled.
-6. Creates a per-run Docker internal network.
-7. Starts Squid when `network` is declared.
-8. Starts the Ollama sidecar when `ollama` is declared.
-9. Waits for Ollama to answer readiness probes and confirm declared models.
-10. Starts the MCP sidecar and exposes only declared MCP tools/resources.
-11. Runs the disposable agent container.
-12. Persists run artifacts and removes disposable containers/network.
+4. Builds or refreshes the MCP sidecar image when `mcp_client` is enabled.
+5. Creates a per-run Docker internal network.
+6. Starts Squid when `network` is declared.
+7. Starts the code sidecar and Jina Reader sidecar when their capabilities are
+   declared.
+8. Starts HAProxy when `haproxy` is declared.
+9. Starts the MCP sidecar and exposes only declared MCP tools/resources.
+10. Runs the disposable agent container.
+11. Persists run artifacts and removes disposable containers/network.
 
 Run artifacts are written under:
 
@@ -79,21 +91,23 @@ capabilities = [
   "network",
   "mcp_client",
   "openai_agents",
-  "ollama",
+  "haproxy",
 ]
 
 [squid_proxy]
 allowed_domains = []
 allowed_ip_addresses = []
 
-[ollama_sidecar]
-models = [
-  "qwen3:0.6b",
+[haproxy]
+backend_host = "host.docker.internal"
+ports = [
+  3306,
 ]
 
 [mcp_sidecar]
 tools = [
   "get_html_element_name",
+  "get_active_items",
 ]
 resources = []
 ```
@@ -102,56 +116,66 @@ The design rule is that the sandbox starts minimal, and every softened boundary
 must be declared. Unknown top-level keys, unknown table keys, and unsupported
 capability values fail closed.
 
-### Ollama Spec
+### HAProxy Spec
 
-Declaring `"ollama"` requires:
+Declaring `"haproxy"` requires:
 
 ```toml
-[ollama_sidecar]
-models = [
-  "qwen3:0.6b",
+[haproxy]
+backend_host = "host.docker.internal"
+ports = [
+  3306,
 ]
 ```
 
 Rules:
 
-- `[ollama_sidecar].models` must be a non-empty list of non-empty strings.
-- Duplicate model names fail validation.
-- `[ollama_sidecar]` cannot contain unknown keys.
-- Non-empty Ollama sidecar configuration is rejected unless `"ollama"` is in
-  `capabilities`.
-- Model names are normalized and sorted before hashing.
+- `haproxy` requires the `network` capability.
+- `[haproxy]` is required when the `haproxy` capability is declared.
+- `[haproxy]` is rejected unless the `haproxy` capability is declared.
+- `backend_host` is optional and defaults to `host.docker.internal`.
+- `ports` must be a non-empty list of unique TCP ports.
+- HAProxy listens on each declared port and proxies to the same backend port.
+- No HAProxy ports are published to the host.
 
-The Ollama image hash is separate from the agent image hash. Changing only the
-normalized Ollama model list changes only the Ollama sidecar image name. Merely
-reordering the same model list does not trigger a different Ollama image name.
+The default HAProxy sidecar maps:
 
-Models are pulled during the Ollama image build, not at container runtime. This
-keeps runs deterministic and makes model changes visible as Docker image
-changes.
+```text
+haproxy-sidecar:3306 -> host.docker.internal:3306
+```
+
+The sidecar starts on Docker's `bridge` network so it can reach
+`host.docker.internal`, then joins the sandbox internal network with alias
+`haproxy-sidecar` so the MCP sidecar can reach it. This is necessary because the
+sandbox network is created with `docker network create --internal`.
 
 ## Runtime Environment
 
-When the Ollama sidecar is enabled, the agent container receives:
+The default workload needs these host environment variables:
 
 ```text
-OLLAMA_BASE_URL=http://ollama-sidecar:11434
-OLLAMA_MODEL=<first declared model>
-OPENAI_BASE_URL=http://ollama-sidecar:11434/v1
-OPENAI_API_KEY=ollama
+OPENAI_API_KEY=<OpenAI API key>
+SANDBOX_TESTER_MARIADB_CREDENTIALS=<username,password>
 ```
 
-`OPENAI_BASE_URL` lets OpenAI-compatible client libraries, including the OpenAI
-Agents SDK when configured with `OpenAIChatCompletionsModel`, call the local
-Ollama endpoint instead of the OpenAI API.
-
-The Ollama sidecar runs on the internal Docker network with alias:
+`SANDBOX_TESTER_MARIADB_CREDENTIALS` is passed only to the MCP sidecar when
+HAProxy is enabled. It must use a comma-separated value:
 
 ```text
-ollama-sidecar
+sandbox_tester,password_goes_here
 ```
 
-It is not intended to be exposed directly to the host.
+When HAProxy is enabled, the MCP sidecar receives:
+
+```text
+MARIADB_HOST=haproxy-sidecar
+MARIADB_PORT=3306
+MARIADB_DATABASE=agent_allowed
+SANDBOX_TESTER_MARIADB_CREDENTIALS=<from host environment>
+```
+
+The AI agent container does not receive `MARIADB_HOST`, `MARIADB_PORT`,
+`MARIADB_DATABASE`, or `SANDBOX_TESTER_MARIADB_CREDENTIALS`.
 
 ## Capabilities
 
@@ -162,45 +186,49 @@ Supported capabilities include:
   requires `network`.
 - `openai`: installs the OpenAI Python SDK for direct client workloads.
 - `openai_agents`: installs the OpenAI Agents SDK and requires `network`.
-- `ollama`: starts the Ollama sidecar and requires `network`.
+- `haproxy`: starts the HAProxy TCP proxy sidecar and requires `network`.
 - `code_execution`: starts the code-execution sidecar for constrained Python
   script execution.
 - `jina_reader`: starts the Jina Reader sidecar for readable page/document
   fetching.
+- `ollama`: starts the Ollama sidecar and requires `network`; this capability
+  remains in the codebase for future local-model options but is not part of the
+  default spec.
 
 Provider-backed capabilities can add provider domains and host environment
-variables. In Ollama mode, the agent receives an explicit local
-`OPENAI_BASE_URL` and dummy `OPENAI_API_KEY=ollama`, so the default workload does
-not call the OpenAI API.
+variables. With the default GPT-backed workload, the agent uses the hosted
+OpenAI API and therefore needs `OPENAI_API_KEY`.
 
 ## Sidecars
 
-### Ollama
+### HAProxy
 
-The Ollama sidecar image is generated from the declared model list. Its
-Dockerfile starts from:
-
-```text
-ollama/ollama:latest
-```
-
-During image build, it starts `ollama serve`, pulls each declared model, and
-then shuts the server down. At runtime, the sidecar starts Ollama with:
+The HAProxy sidecar uses:
 
 ```text
-OLLAMA_HOST=0.0.0.0:11434
+haproxy:latest
 ```
 
-The harness waits for:
-
-1. TCP connectivity to port `11434`.
-2. `/api/tags` to report every declared model.
-
-Readiness details are persisted as:
+For each run, the harness generates a run-local `haproxy.cfg` and mounts it
+read-only at:
 
 ```text
-ollama-sidecar-readiness-results.json
+/usr/local/etc/haproxy/haproxy.cfg
 ```
+
+For the default spec, the generated config listens on container port `3306` and
+forwards TCP traffic to `host.docker.internal:3306`.
+
+HAProxy is intentionally not published to the host. In the current design,
+reachability is restricted by:
+
+- only giving the MCP sidecar the MariaDB environment variables
+- not giving database environment variables to the AI agent container
+- exposing database access only through declared MCP tools
+- not publishing HAProxy ports
+
+Later hardening could add source ACLs, iptables, separate Docker networks, or
+more granular network segmentation.
 
 ### MCP Sidecar
 
@@ -218,11 +246,25 @@ closed at server startup.
 Implemented MCP tools include:
 
 - `get_html_element_name`
+- `get_active_items`
 - `microsoft_docs_search`
 - `microsoft_docs_fetch`
 - `microsoft_code_sample_search`
 - `jina_read_url`
 - `run_python_script`
+
+`get_active_items` connects to MariaDB using `pymysql` and runs:
+
+```sql
+SELECT id, item_key, title, status, notes, quantity, created_at, updated_at
+FROM items
+WHERE status = 'active'
+ORDER BY id
+```
+
+The tool returns JSON text. Tool calls are audited in
+`mcp-sidecar-tool-calls.jsonl`; credential values are not written to the audit
+record.
 
 Implemented MCP resources include:
 
@@ -239,8 +281,7 @@ HTTP_PROXY=http://egress-gateway:3128
 HTTPS_PROXY=http://egress-gateway:3128
 ```
 
-`[squid_proxy]` controls the egress allowlist. The Ollama sidecar is internal
-and is included in proxy bypass settings for agent-to-sidecar calls.
+`[squid_proxy]` controls the egress allowlist.
 
 ### Code Execution
 
@@ -253,9 +294,6 @@ forwards script requests to:
 CODE_SIDECAR_URL=http://code-sidecar:8090
 ```
 
-This sidecar remains available for workloads that need exact computation, but it
-is not used by the current default Ollama workload.
-
 ### Jina Reader
 
 The optional `jina_reader` capability starts `ghcr.io/jina-ai/reader:oss` with
@@ -265,7 +303,25 @@ alias `jina-reader`. The MCP sidecar receives:
 JINA_READER_URL=http://jina-reader:8081
 ```
 
-This sidecar is not used by the current default Ollama workload.
+### Ollama
+
+Ollama support remains available as an optional capability for future local
+model experiments, but it is not used by the default HAProxy/MariaDB workload.
+
+Declaring `"ollama"` requires:
+
+```toml
+[ollama_sidecar]
+models = [
+  "model-name:tag",
+]
+```
+
+The Ollama image hash is separate from the agent image hash. Changing only the
+normalized Ollama model list changes only the Ollama sidecar image name. Merely
+reordering the same model list does not trigger a different Ollama image name.
+
+Models are pulled during the Ollama image build, not at container runtime.
 
 ## Run Artifacts
 
@@ -278,6 +334,12 @@ A successful default run contains files similar to:
   config.json
   gateway-logs.json
   gateway-start-results.json
+  haproxy.cfg
+  haproxy-sidecar-logs.json
+  haproxy-sidecar-metadata.json
+  haproxy-sidecar-start-results.json
+  haproxy-sidecar-stderr.txt
+  haproxy-sidecar-stdout.txt
   landlock-policy.json
   mcp-sidecar-exposure.json
   mcp-sidecar-logs.json
@@ -286,12 +348,6 @@ A successful default run contains files similar to:
   mcp-sidecar-stderr.txt
   mcp-sidecar-stdout.txt
   mcp-sidecar-tool-calls.jsonl
-  ollama-sidecar-logs.json
-  ollama-sidecar-metadata.json
-  ollama-sidecar-readiness-results.json
-  ollama-sidecar-start-results.json
-  ollama-sidecar-stderr.txt
-  ollama-sidecar-stdout.txt
   resolved-profile.json
   run-metadata.json
   sandbox-spec.json
@@ -307,7 +363,8 @@ contains the same message printed by the in-container process. `site/index.html`
 contains the generated HTML document.
 
 `mcp-sidecar-tool-calls.jsonl` is the MCP audit log. For the default workload,
-it should include a successful `get_html_element_name` call returning `<table>`.
+it should include a successful `get_active_items` call returning the active
+MariaDB items as JSON.
 
 ## Sandbox Probes
 
@@ -328,14 +385,19 @@ To serialize probe evidence for troubleshooting:
 - Python 3.11.
 - PowerShell on Windows.
 - Docker Desktop with Linux containers enabled.
-- Network access during image builds to download Python packages, Docker base
-  images, and declared Ollama models.
-- Enough disk space for Docker images and pulled Ollama model weights.
+- MariaDB running on the host and reachable from Docker as
+  `host.docker.internal:3306`.
+- A database named `agent_allowed` with an `items` table compatible with the
+  default `get_active_items` query.
+- A MariaDB user whose credentials are available in
+  `SANDBOX_TESTER_MARIADB_CREDENTIALS`.
+- `OPENAI_API_KEY` for the default GPT-backed workload.
+- Network access during image builds to download Python packages and Docker base
+  images.
 
-The default Ollama-backed workload does not require a host `OPENAI_API_KEY`.
-
-Docker image builds can take several minutes the first time an image is created,
-especially when a model must be pulled into the Ollama sidecar image.
+Docker image builds can take several minutes the first time an image is created.
+The MCP sidecar image is refreshed during startup so dependency changes such as
+`pymysql` are picked up.
 
 ## Setup
 
@@ -368,12 +430,11 @@ This runs:
 The project has five main packages:
 
 - `sandbox_agent`: the in-container workload. It owns the OpenAI Agents SDK
-  prompt, local model configuration, MCP client calls, HTML document generation,
-  and artifact saving.
+  prompt, MCP client calls, HTML document generation, and artifact saving.
 - `mcp_sidecar`: the MCP server container workload. It owns local MCP resources,
-  local MCP tools, Microsoft Learn proxy tools, Jina Reader client logic,
-  code-execution client logic, streamable HTTP server setup, and sidecar audit
-  logging.
+  local MCP tools, Microsoft Learn proxy tools, MariaDB access, Jina Reader
+  client logic, code-execution client logic, streamable HTTP server setup, and
+  sidecar audit logging.
 - `code_sidecar`: the optional no-network code-execution sidecar.
 - `docker_sandbox`: the host/container harness. It owns sandbox spec loading,
   Dockerfile generation, image creation, Docker local network creation, Squid
@@ -395,25 +456,29 @@ The default Docker topology is:
 Docker host
   docker_sandbox host runner
     |
-    +-- Docker internal network
+    +-- Docker bridge network
+    |     |
+    |     +-- haproxy-sidecar-* container
+    |           backend: host.docker.internal:3306
+    |
+    +-- Docker internal sandbox network
           |
           +-- sandbox-agent-* container
-          |     OPENAI_BASE_URL=http://ollama-sidecar:11434/v1
-          |     OLLAMA_MODEL=qwen3:0.6b
           |     MCP_SIDECAR_URL=http://mcp-sidecar:8000/mcp
-          |
-          +-- ollama-sidecar-* container
-          |     network alias: ollama-sidecar
           |
           +-- mcp-sidecar-* container
           |     network alias: mcp-sidecar
+          |     MARIADB_HOST=haproxy-sidecar
+          |
+          +-- haproxy-sidecar-* container
+          |     network alias: haproxy-sidecar
           |
           +-- squid proxy container
                 network alias: egress-gateway
 ```
 
-Optional runs may also include `code-sidecar-*` and `jina-reader-*` containers
-when their capabilities are declared.
+Optional runs may also include `code-sidecar-*`, `jina-reader-*`, and
+`ollama-sidecar-*` containers when their capabilities are declared.
 
 ## Project Structure
 
@@ -423,7 +488,7 @@ ARCHITECTURE.png               Static Docker topology infographic
 src/sandbox_agent/
   __main__.py                  Package entry point for python -m sandbox_agent
   cli.py                       Host delegation and in-container workload entry point
-  openai_agent.py              Ollama-backed OpenAI Agents SDK workload
+  openai_agent.py              OpenAI Agents SDK workload
   openai_tools.py              OpenAI Agents SDK tool adapters
   sandbox_spec.toml            Declarative sandbox capability spec
   tools.py                     Neutral tools, MCP client calls, and artifact saving
@@ -434,7 +499,7 @@ src/mcp_sidecar/
   cli.py                       MCP sidecar command-line entry point
   resources.py                 Local MCP resources
   server.py                    FastMCP server construction and exposure registry
-  tools.py                     Local, Microsoft Learn, Jina, and code tools
+  tools.py                     Local, MariaDB, Microsoft Learn, Jina, and code tools
   dockerfile/Dockerfile        MCP sidecar image definition
 
 src/code_sidecar/
@@ -472,27 +537,30 @@ scripts/
 
 ## Notes
 
-OllamaSidecar is a learning and hardening exercise, not a security proof. The
+HAProxySidecar is a learning and hardening exercise, not a security proof. The
 container policy reduces accidental host exposure and makes required capability
 softening visible, but Docker, Landlock, seccomp, Squid, MCP tool boundaries,
 sidecar behavior, and Python runtime guards should not be interpreted as a
 complete isolation guarantee.
 
-Generated content can vary between runs because it is model-generated. Small
-local models such as `qwen3:0.6b` are useful for proving local text generation
-through the sidecar, but should not be assumed reliable for complex reasoning or
-multi-tool planning.
+The current "only MCP sidecar can access MariaDB" posture is practical rather
+than absolute: the agent is not given database environment variables and the
+database tool is only exposed through MCP declarations, but Docker networking is
+not yet enforcing per-container ACLs.
+
+Generated content can vary between runs because it is model-generated.
 
 Run artifacts under `.docker_sandbox/runs` are ignored by Git.
 
 ## Third-Party Notices
 
 This project uses third-party packages including `mcp`, `openai`,
-`openai-agents`, and `pillow`. It also uses Docker images such as
+`openai-agents`, `pillow`, and `pymysql`. It also uses Docker images such as
 `python:3.12-slim` for the agent, MCP sidecar, and code sidecar,
-`ubuntu/squid:latest` for the Squid gateway, `ollama/ollama:latest` for the
-Ollama sidecar, and `ghcr.io/jina-ai/reader:oss` for the optional Jina Reader
-sidecar. See each package and image license metadata for details.
+`ubuntu/squid:latest` for the Squid gateway, `haproxy:latest` for the HAProxy
+sidecar, `ollama/ollama:latest` for optional Ollama runs, and
+`ghcr.io/jina-ai/reader:oss` for the optional Jina Reader sidecar. See each
+package and image license metadata for details.
 
 ## License
 

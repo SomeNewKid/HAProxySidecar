@@ -12,6 +12,7 @@ _OUTPUT_DIRECTORY = Path("/sandbox-output")
 _SITE_DIRECTORY = _OUTPUT_DIRECTORY / "site"
 _ANSWER_FILE_PATH = _OUTPUT_DIRECTORY / "answer.txt"
 _MCP_SIDECAR_URL_ENVIRONMENT_VARIABLE = "MCP_SIDECAR_URL"
+_MCP_ACTIVE_ITEMS_TOOL_NAME = "get_active_items"
 _MCP_HTML_ELEMENT_TOOL_NAME = "get_html_element_name"
 _MCP_MICROSOFT_DOCS_SEARCH_TOOL_NAME = "microsoft_docs_search"
 _MCP_MICROSOFT_DOCS_FETCH_TOOL_NAME = "microsoft_docs_fetch"
@@ -141,6 +142,11 @@ def get_html_element_name() -> str:
     """Return the HTML element name provided by the MCP sidecar."""
     sidecar_url = _get_mcp_sidecar_url()
     return _call_mcp_html_element_tool(sidecar_url)
+
+
+def get_active_items() -> str:
+    """Return active item records provided by the MCP sidecar."""
+    return _call_mcp_sidecar_tool(_MCP_ACTIVE_ITEMS_TOOL_NAME, {})
 
 
 def microsoft_docs_search(query: str) -> str:

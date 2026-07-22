@@ -3,14 +3,21 @@ capabilities = [
   "network",
   "mcp_client",
   "openai_agents",
+  "haproxy",
 ]
 
 [squid_proxy]
 allowed_domains = []
 allowed_ip_addresses = []
 
+[haproxy]
+ports = [
+  3306,
+]
+
 [mcp_sidecar]
 tools = [
   "get_html_element_name",
+  "get_active_items",
 ]
 resources = []

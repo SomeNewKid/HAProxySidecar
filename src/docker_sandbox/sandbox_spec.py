@@ -15,6 +15,7 @@ from .models import (
     DockerProfile,
     DockerUlimit,
     EnvironmentVariablePolicy,
+    HAProxyConfiguration,
     LandlockPathRule,
     NetworkDnsPolicy,
     NetworkGatewayProfile,
@@ -28,6 +29,7 @@ _NETWORK_CAPABILITY = "network"
 _MCP_CLIENT_CAPABILITY = "mcp_client"
 _JINA_READER_CAPABILITY = "jina_reader"
 _CODE_EXECUTION_CAPABILITY = "code_execution"
+_HAPROXY_CAPABILITY = "haproxy"
 _OLLAMA_CAPABILITY = "ollama"
 _OPENAI_CAPABILITY = "openai"
 _OPENAI_AGENTS_CAPABILITY = "openai_agents"
@@ -47,9 +49,14 @@ _SUPPORTED_KEYS = {
     "schema_version",
     "capabilities",
     "environment_variables",
+    "haproxy",
     "mcp_sidecar",
     "ollama_sidecar",
     "squid_proxy",
+}
+_HAPROXY_KEYS = {
+    "backend_host",
+    "ports",
 }
 _MCP_SIDECAR_KEYS = {
     "tools",
@@ -67,6 +74,7 @@ _SUPPORTED_CAPABILITIES = {
     _MCP_CLIENT_CAPABILITY,
     _JINA_READER_CAPABILITY,
     _CODE_EXECUTION_CAPABILITY,
+    _HAPROXY_CAPABILITY,
     _OLLAMA_CAPABILITY,
     _OPENAI_CAPABILITY,
     _OPENAI_AGENTS_CAPABILITY,
@@ -117,6 +125,7 @@ _ANTHROPIC_ALLOWED_DOMAIN = ".anthropic.com"
 _GATEWAY_IMAGE_NAME = "ubuntu/squid:latest"
 _GATEWAY_PROXY_HOST = "egress-gateway"
 _GATEWAY_PROXY_PORT = 3128
+_DEFAULT_HAPROXY_BACKEND_HOST = "host.docker.internal"
 _NO_PROXY_HOSTS = (
     "127.0.0.1",
     "localhost",
@@ -142,6 +151,7 @@ class SandboxSpec:
     environment_variables: tuple[SandboxEnvironmentVariable, ...] = ()
     mcp_sidecar_tools: tuple[str, ...] = ()
     mcp_sidecar_resources: tuple[str, ...] = ()
+    haproxy: HAProxyConfiguration | None = None
     ollama_models: tuple[str, ...] = ()
 
     @property
@@ -220,9 +230,19 @@ class SandboxSpec:
                 "tools": list(self.mcp_sidecar_tools),
                 "resources": list(self.mcp_sidecar_resources),
             },
+            "haproxy": self._haproxy_to_dict(),
             "ollama_sidecar": {
                 "models": list(self.ollama_models),
             },
+        }
+
+    def _haproxy_to_dict(self) -> dict[str, object]:
+        if self.haproxy is None:
+            return {}
+
+        return {
+            "backend_host": self.haproxy.backend_host,
+            "ports": list(self.haproxy.ports),
         }
 
     def to_agent_image_dict(self) -> dict[str, object]:
@@ -231,9 +251,10 @@ class SandboxSpec:
         capabilities = [
             capability
             for capability in self.capabilities
-            if capability != _OLLAMA_CAPABILITY
+            if capability not in {_HAPROXY_CAPABILITY, _OLLAMA_CAPABILITY}
         ]
         data["capabilities"] = capabilities
+        data.pop("haproxy")
         data.pop("ollama_sidecar")
         return data
 
@@ -293,6 +314,7 @@ def load_sandbox_spec(path: Path) -> SandboxSpec:
     allowed_domains, allowed_ip_addresses = _read_squid_proxy(data)
     environment_variables = _read_environment_variables(data)
     mcp_sidecar_tools, mcp_sidecar_resources = _read_mcp_sidecar(data)
+    haproxy = _read_haproxy(data, capabilities)
     ollama_models = _read_ollama_sidecar(data, capabilities)
     _validate_network_settings(capabilities, allowed_domains, allowed_ip_addresses)
     _validate_mcp_sidecar_settings(capabilities, mcp_sidecar_tools)
@@ -305,6 +327,7 @@ def load_sandbox_spec(path: Path) -> SandboxSpec:
         environment_variables=environment_variables,
         mcp_sidecar_tools=mcp_sidecar_tools,
         mcp_sidecar_resources=mcp_sidecar_resources,
+        haproxy=haproxy,
         ollama_models=ollama_models,
     )
 
@@ -614,6 +637,66 @@ def _read_mcp_sidecar(
     return tools, resources
 
 
+def _read_haproxy(
+    data: dict[str, object],
+    capabilities: tuple[str, ...],
+) -> HAProxyConfiguration | None:
+    value = data.get("haproxy")
+    has_haproxy_capability = _HAPROXY_CAPABILITY in capabilities
+    if value is None:
+        if has_haproxy_capability:
+            raise ValueError("The haproxy capability requires [haproxy].")
+
+        return None
+
+    if not has_haproxy_capability:
+        raise ValueError("[haproxy] requires the haproxy capability.")
+
+    if not isinstance(value, dict):
+        raise ValueError("haproxy must be a table.")
+
+    unknown_keys = set(value) - _HAPROXY_KEYS
+    if unknown_keys:
+        names = ", ".join(sorted(unknown_keys))
+        raise ValueError(f"Unsupported haproxy key: {names}")
+
+    backend_host = _read_haproxy_backend_host(value)
+    ports = _read_haproxy_ports(value)
+    return HAProxyConfiguration(backend_host=backend_host, ports=ports)
+
+
+def _read_haproxy_backend_host(data: dict[str, object]) -> str:
+    value = data.get("backend_host", _DEFAULT_HAPROXY_BACKEND_HOST)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("haproxy backend_host must be a non-empty string.")
+
+    return value.strip()
+
+
+def _read_haproxy_ports(data: dict[str, object]) -> tuple[int, ...]:
+    value = data.get("ports")
+    if not isinstance(value, list):
+        raise ValueError("haproxy ports must be a non-empty list of TCP ports.")
+
+    ports = []
+    for port in value:
+        if not isinstance(port, int) or isinstance(port, bool):
+            raise ValueError("haproxy ports must contain only integer TCP ports.")
+        if port < 1 or port > 65535:
+            raise ValueError("haproxy ports must be between 1 and 65535.")
+        ports.append(port)
+
+    if not ports:
+        raise ValueError("haproxy ports must be a non-empty list of TCP ports.")
+
+    duplicate_ports = _find_duplicate_ports(tuple(ports))
+    if duplicate_ports:
+        names = ", ".join(str(port) for port in duplicate_ports)
+        raise ValueError(f"Duplicate haproxy port: {names}")
+
+    return tuple(ports)
+
+
 def _read_ollama_sidecar(
     data: dict[str, object],
     capabilities: tuple[str, ...],
@@ -733,6 +816,8 @@ def _validate_network_settings(
         raise ValueError("The mcp_client capability requires the network capability.")
     if _JINA_READER_CAPABILITY in capabilities and not has_network:
         raise ValueError("The jina_reader capability requires the network capability.")
+    if _HAPROXY_CAPABILITY in capabilities and not has_network:
+        raise ValueError("The haproxy capability requires the network capability.")
     if _OLLAMA_CAPABILITY in capabilities and not has_network:
         raise ValueError("The ollama capability requires the network capability.")
 
@@ -789,6 +874,19 @@ def _find_duplicate_ollama_models(models: tuple[str, ...]) -> tuple[str, ...]:
             continue
 
         seen.add(model)
+
+    return tuple(duplicates)
+
+
+def _find_duplicate_ports(ports: tuple[int, ...]) -> tuple[int, ...]:
+    seen = set()
+    duplicates = []
+    for port in ports:
+        if port in seen and port not in duplicates:
+            duplicates.append(port)
+            continue
+
+        seen.add(port)
 
     return tuple(duplicates)
 

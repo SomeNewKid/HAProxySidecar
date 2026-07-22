@@ -28,6 +28,7 @@ from .models import (
     DockerConfiguration,
     DockerRunResult,
     EnvironmentVariablePolicy,
+    HAProxyConfiguration,
     NetworkDnsPolicy,
     NetworkGatewayProfile,
     SandboxRunTarget,
@@ -65,6 +66,12 @@ _CODE_SIDECAR_LOG_FILE_NAME = "code-sidecar-logs.json"
 _CODE_SIDECAR_STDOUT_FILE_NAME = "code-sidecar-stdout.txt"
 _CODE_SIDECAR_STDERR_FILE_NAME = "code-sidecar-stderr.txt"
 _CODE_SIDECAR_METADATA_FILE_NAME = "code-sidecar-metadata.json"
+_HAPROXY_CONFIGURATION_FILE_NAME = "haproxy.cfg"
+_HAPROXY_SIDECAR_START_RESULTS_FILE_NAME = "haproxy-sidecar-start-results.json"
+_HAPROXY_SIDECAR_LOG_FILE_NAME = "haproxy-sidecar-logs.json"
+_HAPROXY_SIDECAR_STDOUT_FILE_NAME = "haproxy-sidecar-stdout.txt"
+_HAPROXY_SIDECAR_STDERR_FILE_NAME = "haproxy-sidecar-stderr.txt"
+_HAPROXY_SIDECAR_METADATA_FILE_NAME = "haproxy-sidecar-metadata.json"
 _OLLAMA_SIDECAR_START_RESULTS_FILE_NAME = "ollama-sidecar-start-results.json"
 _OLLAMA_SIDECAR_LOG_FILE_NAME = "ollama-sidecar-logs.json"
 _OLLAMA_SIDECAR_STDOUT_FILE_NAME = "ollama-sidecar-stdout.txt"
@@ -105,6 +112,12 @@ _MCP_SIDECAR_AUDIT_LOG_PATH_ENVIRONMENT_VARIABLE = "MCP_SIDECAR_AUDIT_LOG_PATH"
 _MCP_SIDECAR_EXPOSURE_PATH_ENVIRONMENT_VARIABLE = "MCP_SIDECAR_EXPOSURE_PATH"
 _MCP_SIDECAR_OUTPUT_DIRECTORY = "/mcp-sidecar-output"
 _MCP_SIDECAR_CONFIG_DIRECTORY = "/mcp-sidecar-config"
+_MARIADB_HOST_ENVIRONMENT_VARIABLE = "MARIADB_HOST"
+_MARIADB_PORT_ENVIRONMENT_VARIABLE = "MARIADB_PORT"
+_MARIADB_DATABASE_ENVIRONMENT_VARIABLE = "MARIADB_DATABASE"
+_MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE = "SANDBOX_TESTER_MARIADB_CREDENTIALS"
+_MARIADB_DATABASE_NAME = "agent_allowed"
+_MARIADB_DEFAULT_PORT = 3306
 _OPENAI_API_KEY_ENVIRONMENT_VARIABLE = "OPENAI_API_KEY"
 _OPENAI_BASE_URL_ENVIRONMENT_VARIABLE = "OPENAI_BASE_URL"
 _JINA_READER_IMAGE_NAME = "ghcr.io/jina-ai/reader:oss"
@@ -116,6 +129,7 @@ _JINA_READER_READINESS_URL = "https://example.com"
 _JINA_READER_READINESS_INTERVALS_SECONDS = (0.0, 1.0, 2.0, 4.0, 8.0, 16.0)
 _JINA_READER_CAPABILITY = "jina_reader"
 _CODE_EXECUTION_CAPABILITY = "code_execution"
+_HAPROXY_CAPABILITY = "haproxy"
 _OLLAMA_CAPABILITY = "ollama"
 _OLLAMA_SIDECAR_CONTAINER_NAME_PREFIX = "ollama-sidecar"
 _OLLAMA_SIDECAR_ALIAS = "ollama-sidecar"
@@ -131,6 +145,10 @@ _CODE_SIDECAR_PORT = 8090
 _CODE_SIDECAR_URL_ENVIRONMENT_VARIABLE = "CODE_SIDECAR_URL"
 _CODE_SIDECAR_OUTPUT_DIRECTORY_ENVIRONMENT_VARIABLE = "CODE_SIDECAR_OUTPUT_DIRECTORY"
 _CODE_SIDECAR_OUTPUT_DIRECTORY = "/code-sidecar-output"
+_HAPROXY_IMAGE_NAME = "haproxy:latest"
+_HAPROXY_SIDECAR_CONTAINER_NAME_PREFIX = "haproxy-sidecar"
+_HAPROXY_SIDECAR_ALIAS = "haproxy-sidecar"
+_HAPROXY_CONFIGURATION_PATH = "/usr/local/etc/haproxy/haproxy.cfg"
 _OLLAMA_BASE_IMAGE_NAME = "ollama/ollama:latest"
 _OLLAMA_GENERATED_DIRECTORY = "ollama-sidecar"
 
@@ -167,6 +185,10 @@ def run_sandbox_container(
         configuration,
         timestamp,
     )
+    haproxy_sidecar_container_name = _build_haproxy_sidecar_container_name(
+        configuration,
+        timestamp,
+    )
     ollama_sidecar_container_name = _build_ollama_sidecar_container_name(
         configuration,
         timestamp,
@@ -191,6 +213,7 @@ def run_sandbox_container(
     )
     _write_squid_configuration(configuration, run_directory, config_data)
     _write_mcp_sidecar_exposure(configuration, run_directory)
+    _write_haproxy_configuration(configuration, run_directory)
     config_path = run_directory / "config.json"
     config_json = json.dumps(config_data, indent=2)
     config_path.write_text(f"{config_json}\n", encoding="utf-8")
@@ -221,6 +244,12 @@ def run_sandbox_container(
         run_directory,
         network_name,
         code_sidecar_container_name,
+    )
+    haproxy_sidecar_commands = _start_haproxy_sidecar(
+        configuration,
+        run_directory,
+        network_name,
+        haproxy_sidecar_container_name,
     )
     ollama_sidecar_commands = _start_ollama_sidecar(
         configuration,
@@ -258,6 +287,11 @@ def run_sandbox_container(
     _write_mcp_sidecar_logs(configuration, run_directory, mcp_sidecar_container_name)
     _write_jina_reader_logs(configuration, run_directory, jina_reader_container_name)
     _write_code_sidecar_logs(configuration, run_directory, code_sidecar_container_name)
+    _write_haproxy_sidecar_logs(
+        configuration,
+        run_directory,
+        haproxy_sidecar_container_name,
+    )
     _write_ollama_sidecar_logs(
         configuration,
         run_directory,
@@ -284,6 +318,10 @@ def run_sandbox_container(
     code_sidecar_cleanup_commands = _build_code_sidecar_cleanup_commands(
         configuration,
         code_sidecar_container_name,
+    )
+    haproxy_sidecar_cleanup_commands = _build_haproxy_sidecar_cleanup_commands(
+        configuration,
+        haproxy_sidecar_container_name,
     )
     ollama_sidecar_cleanup_commands = _build_ollama_sidecar_cleanup_commands(
         configuration,
@@ -314,6 +352,9 @@ def run_sandbox_container(
         code_sidecar_container_name=code_sidecar_container_name,
         code_sidecar_commands=code_sidecar_commands,
         code_sidecar_cleanup_commands=code_sidecar_cleanup_commands,
+        haproxy_sidecar_container_name=haproxy_sidecar_container_name,
+        haproxy_sidecar_commands=haproxy_sidecar_commands,
+        haproxy_sidecar_cleanup_commands=haproxy_sidecar_cleanup_commands,
         ollama_sidecar_container_name=ollama_sidecar_container_name,
         ollama_sidecar_commands=ollama_sidecar_commands,
         ollama_sidecar_cleanup_commands=ollama_sidecar_cleanup_commands,
@@ -404,6 +445,16 @@ def _build_code_sidecar_container_name(
         return None
 
     return f"{_CODE_SIDECAR_CONTAINER_NAME_PREFIX}-{timestamp}"
+
+
+def _build_haproxy_sidecar_container_name(
+    configuration: DockerConfiguration,
+    timestamp: str,
+) -> str | None:
+    if not _should_start_haproxy_sidecar(configuration):
+        return None
+
+    return f"{_HAPROXY_SIDECAR_CONTAINER_NAME_PREFIX}-{timestamp}"
 
 
 def _build_ollama_sidecar_container_name(
@@ -892,10 +943,9 @@ def _start_mcp_sidecar(
     commands.append(inspect_command)
     results.append(inspect_result)
 
-    if inspect_result["returncode"] != 0:
-        build_result = _run_recorded_docker_command(build_command)
-        commands.append(build_command)
-        results.append(build_result)
+    build_result = _run_recorded_docker_command(build_command)
+    commands.append(build_command)
+    results.append(build_result)
 
     run_result = _run_recorded_docker_command(run_command)
     commands.append(run_command)
@@ -961,7 +1011,7 @@ def _build_mcp_sidecar_run_command(
         f"{_MCP_SIDECAR_OUTPUT_DIRECTORY}/{_MCP_SIDECAR_TOOL_CALLS_FILE_NAME}"
     )
     exposure_path = f"{_MCP_SIDECAR_CONFIG_DIRECTORY}/{_MCP_SIDECAR_EXPOSURE_FILE_NAME}"
-    return [
+    command = [
         _DOCKER_EXECUTABLE,
         "run",
         "--detach",
@@ -976,10 +1026,7 @@ def _build_mcp_sidecar_run_command(
         "--env",
         f"HTTPS_PROXY={proxy_url}",
         "--env",
-        (
-            "NO_PROXY=localhost,127.0.0.1,"
-            f"{_MCP_SIDECAR_ALIAS},{_JINA_READER_ALIAS},{_CODE_SIDECAR_ALIAS}"
-        ),
+        f"NO_PROXY={_build_mcp_sidecar_no_proxy(configuration)}",
         "--env",
         (
             f"{_JINA_READER_URL_ENVIRONMENT_VARIABLE}="
@@ -994,21 +1041,68 @@ def _build_mcp_sidecar_run_command(
         f"{_MCP_SIDECAR_AUDIT_LOG_PATH_ENVIRONMENT_VARIABLE}={audit_log_path}",
         "--env",
         f"{_MCP_SIDECAR_EXPOSURE_PATH_ENVIRONMENT_VARIABLE}={exposure_path}",
-        "--mount",
-        source_mount,
-        "--mount",
-        output_mount,
-        "--mount",
-        exposure_mount,
-        _MCP_SIDECAR_IMAGE_NAME,
-        "python",
-        "-m",
-        "mcp_sidecar",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(_MCP_SIDECAR_PORT),
     ]
+    command.extend(_build_mcp_sidecar_database_environment_options(configuration))
+    command.extend(
+        [
+            "--mount",
+            source_mount,
+            "--mount",
+            output_mount,
+            "--mount",
+            exposure_mount,
+            _MCP_SIDECAR_IMAGE_NAME,
+            "python",
+            "-m",
+            "mcp_sidecar",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(_MCP_SIDECAR_PORT),
+        ]
+    )
+    return command
+
+
+def _build_mcp_sidecar_no_proxy(configuration: DockerConfiguration) -> str:
+    hosts = [
+        "localhost",
+        "127.0.0.1",
+        _MCP_SIDECAR_ALIAS,
+        _JINA_READER_ALIAS,
+        _CODE_SIDECAR_ALIAS,
+    ]
+    if _should_start_haproxy_sidecar(configuration):
+        hosts.append(_HAPROXY_SIDECAR_ALIAS)
+
+    return ",".join(hosts)
+
+
+def _build_mcp_sidecar_database_environment_options(
+    configuration: DockerConfiguration,
+) -> list[str]:
+    if not _should_start_haproxy_sidecar(configuration):
+        return []
+
+    haproxy = _get_haproxy_configuration(configuration)
+    port = _resolve_mariadb_proxy_port(haproxy.ports)
+    return [
+        "--env",
+        f"{_MARIADB_HOST_ENVIRONMENT_VARIABLE}={_HAPROXY_SIDECAR_ALIAS}",
+        "--env",
+        f"{_MARIADB_PORT_ENVIRONMENT_VARIABLE}={port}",
+        "--env",
+        f"{_MARIADB_DATABASE_ENVIRONMENT_VARIABLE}={_MARIADB_DATABASE_NAME}",
+        "--env",
+        _MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE,
+    ]
+
+
+def _resolve_mariadb_proxy_port(ports: tuple[int, ...]) -> int:
+    if _MARIADB_DEFAULT_PORT in ports:
+        return _MARIADB_DEFAULT_PORT
+
+    return ports[0]
 
 
 def _build_mcp_sidecar_source_mount(configuration: DockerConfiguration) -> str:
@@ -1639,6 +1733,193 @@ def _write_code_sidecar_logs(
     log_path.write_text(f"{log_text}\n", encoding="utf-8")
 
 
+def _write_haproxy_configuration(
+    configuration: DockerConfiguration,
+    run_directory: Path,
+) -> None:
+    if not _should_start_haproxy_sidecar(configuration):
+        return
+
+    haproxy = _get_haproxy_configuration(configuration)
+    config_path = run_directory / _HAPROXY_CONFIGURATION_FILE_NAME
+    config_text = _generate_haproxy_configuration(
+        haproxy.backend_host,
+        haproxy.ports,
+    )
+    config_path.write_text(f"{config_text.rstrip()}\n", encoding="utf-8")
+
+
+def _generate_haproxy_configuration(backend_host: str, ports: tuple[int, ...]) -> str:
+    port_sections = []
+    for port in ports:
+        port_sections.append(
+            "\n".join(
+                [
+                    f"frontend tcp_{port}",
+                    f"    bind *:{port}",
+                    f"    default_backend backend_{port}",
+                    "",
+                    f"backend backend_{port}",
+                    f"    server host {backend_host}:{port}",
+                ]
+            )
+        )
+
+    return "\n\n".join(
+        [
+            "global",
+            "    log stdout format raw local0",
+            "    maxconn 256",
+            "",
+            "defaults",
+            "    mode tcp",
+            "    log global",
+            "    timeout connect 5s",
+            "    timeout client 1m",
+            "    timeout server 1m",
+            "",
+            *port_sections,
+        ]
+    )
+
+
+def _get_haproxy_configuration(
+    configuration: DockerConfiguration,
+) -> HAProxyConfiguration:
+    if _HAPROXY_CAPABILITY not in configuration.enabled_capabilities:
+        raise ValueError("HAProxy sidecar requires the haproxy capability.")
+    if configuration.haproxy is None:
+        raise ValueError("HAProxy sidecar configuration is not configured.")
+    if not configuration.haproxy.ports:
+        raise ValueError("HAProxy sidecar requires at least one port.")
+
+    return configuration.haproxy
+
+
+def _start_haproxy_sidecar(
+    configuration: DockerConfiguration,
+    run_directory: Path,
+    network_name: str | None,
+    haproxy_sidecar_container_name: str | None,
+) -> list[list[str]] | None:
+    if not _should_start_haproxy_sidecar(configuration):
+        return None
+
+    if network_name is None or haproxy_sidecar_container_name is None:
+        raise RuntimeError("HAProxy sidecar requires an internal network.")
+
+    run_command = _build_haproxy_sidecar_run_command(
+        run_directory,
+        haproxy_sidecar_container_name,
+    )
+    network_connect_command = _build_haproxy_sidecar_network_connect_command(
+        network_name,
+        haproxy_sidecar_container_name,
+    )
+    result = _run_recorded_docker_command(run_command)
+    network_connect_result = _run_recorded_docker_command(network_connect_command)
+    _write_haproxy_sidecar_start_results(
+        run_directory,
+        [result, network_connect_result],
+    )
+    return [run_command, network_connect_command]
+
+
+def _build_haproxy_sidecar_run_command(
+    run_directory: Path,
+    haproxy_sidecar_container_name: str,
+) -> list[str]:
+    config_path = run_directory / _HAPROXY_CONFIGURATION_FILE_NAME
+    return [
+        _DOCKER_EXECUTABLE,
+        "run",
+        "--detach",
+        "--name",
+        haproxy_sidecar_container_name,
+        "--network",
+        "bridge",
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "--mount",
+        (
+            f"type=bind,source={config_path},"
+            f"target={_HAPROXY_CONFIGURATION_PATH},readonly"
+        ),
+        _HAPROXY_IMAGE_NAME,
+    ]
+
+
+def _build_haproxy_sidecar_network_connect_command(
+    network_name: str,
+    haproxy_sidecar_container_name: str,
+) -> list[str]:
+    return [
+        _DOCKER_EXECUTABLE,
+        "network",
+        "connect",
+        "--alias",
+        _HAPROXY_SIDECAR_ALIAS,
+        network_name,
+        haproxy_sidecar_container_name,
+    ]
+
+
+def _write_haproxy_sidecar_start_results(
+    run_directory: Path,
+    results: list[dict[str, object]],
+) -> None:
+    results_path = run_directory / _HAPROXY_SIDECAR_START_RESULTS_FILE_NAME
+    results_text = json.dumps(results, indent=2)
+    results_path.write_text(f"{results_text}\n", encoding="utf-8")
+
+
+def _write_haproxy_sidecar_logs(
+    configuration: DockerConfiguration,
+    run_directory: Path,
+    haproxy_sidecar_container_name: str | None,
+) -> None:
+    if not _should_start_haproxy_sidecar(configuration):
+        return
+
+    if haproxy_sidecar_container_name is None:
+        return
+
+    completed = subprocess.run(
+        [_DOCKER_EXECUTABLE, "logs", haproxy_sidecar_container_name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    (run_directory / _HAPROXY_SIDECAR_STDOUT_FILE_NAME).write_text(
+        completed.stdout,
+        encoding="utf-8",
+    )
+    (run_directory / _HAPROXY_SIDECAR_STDERR_FILE_NAME).write_text(
+        completed.stderr,
+        encoding="utf-8",
+    )
+    haproxy = _get_haproxy_configuration(configuration)
+    metadata = {
+        "container_name": haproxy_sidecar_container_name,
+        "image_name": _HAPROXY_IMAGE_NAME,
+        "backend_host": haproxy.backend_host,
+        "ports": list(haproxy.ports),
+        "log_command": completed.args,
+        "log_returncode": completed.returncode,
+    }
+    metadata_text = json.dumps(metadata, indent=2)
+    metadata_path = run_directory / _HAPROXY_SIDECAR_METADATA_FILE_NAME
+    metadata_path.write_text(f"{metadata_text}\n", encoding="utf-8")
+    log_data = {
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+    log_text = json.dumps(log_data, indent=2)
+    log_path = run_directory / _HAPROXY_SIDECAR_LOG_FILE_NAME
+    log_path.write_text(f"{log_text}\n", encoding="utf-8")
+
+
 def _start_jina_reader(
     configuration: DockerConfiguration,
     run_directory: Path,
@@ -1996,6 +2277,19 @@ def _build_code_sidecar_cleanup_commands(
     return [[_DOCKER_EXECUTABLE, "rm", "--force", code_sidecar_container_name]]
 
 
+def _build_haproxy_sidecar_cleanup_commands(
+    configuration: DockerConfiguration,
+    haproxy_sidecar_container_name: str | None,
+) -> list[list[str]] | None:
+    if not _should_start_haproxy_sidecar(configuration):
+        return None
+
+    if haproxy_sidecar_container_name is None:
+        return None
+
+    return [[_DOCKER_EXECUTABLE, "rm", "--force", haproxy_sidecar_container_name]]
+
+
 def _build_ollama_sidecar_cleanup_commands(
     configuration: DockerConfiguration,
     ollama_sidecar_container_name: str | None,
@@ -2029,6 +2323,14 @@ def _should_start_code_sidecar(configuration: DockerConfiguration) -> bool:
         configuration.run_target == SandboxRunTarget.AGENT
         and configuration.profile.network_gateway is not None
         and _CODE_EXECUTION_CAPABILITY in configuration.enabled_capabilities
+    )
+
+
+def _should_start_haproxy_sidecar(configuration: DockerConfiguration) -> bool:
+    return (
+        configuration.run_target == SandboxRunTarget.AGENT
+        and configuration.profile.network_gateway is not None
+        and _HAPROXY_CAPABILITY in configuration.enabled_capabilities
     )
 
 
@@ -2476,7 +2778,18 @@ def _build_container_environment(
         container_environment[_OPENAI_API_KEY_ENVIRONMENT_VARIABLE] = (
             _OLLAMA_OPENAI_API_KEY
         )
+    _remove_agent_database_environment(container_environment)
     return container_environment
+
+
+def _remove_agent_database_environment(environment: dict[str, str]) -> None:
+    for name in (
+        _MARIADB_HOST_ENVIRONMENT_VARIABLE,
+        _MARIADB_PORT_ENVIRONMENT_VARIABLE,
+        _MARIADB_DATABASE_ENVIRONMENT_VARIABLE,
+        _MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE,
+    ):
+        environment.pop(name, None)
 
 
 def _build_agent_no_proxy_hosts(
@@ -2499,6 +2812,14 @@ def _build_effective_local_environment_variable_names(
     names = set(local_environment_variable_names)
     if _should_start_ollama_sidecar(configuration):
         names.discard(_OPENAI_API_KEY_ENVIRONMENT_VARIABLE)
+    names.difference_update(
+        {
+            _MARIADB_HOST_ENVIRONMENT_VARIABLE,
+            _MARIADB_PORT_ENVIRONMENT_VARIABLE,
+            _MARIADB_DATABASE_ENVIRONMENT_VARIABLE,
+            _MARIADB_CREDENTIALS_ENVIRONMENT_VARIABLE,
+        }
+    )
 
     return names
 

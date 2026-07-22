@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .resources import ANSWER_FORMAT_RESOURCE_URI, get_answer_format
 from .tools import (
+    get_active_items,
     get_html_element_name,
     jina_read_url,
     microsoft_code_sample_search,
@@ -47,6 +48,15 @@ class _ResourceDefinition:
 
 
 _TOOL_REGISTRY = {
+    "get_active_items": _ToolDefinition(
+        name="get_active_items",
+        description=(
+            "Return active records from the host MariaDB agent_allowed.items "
+            "table through the HAProxy sidecar. Use when the sandboxed agent "
+            "needs the current active items. Returns a JSON array ordered by id."
+        ),
+        handler=get_active_items,
+    ),
     "get_html_element_name": _ToolDefinition(
         name="get_html_element_name",
         description=(

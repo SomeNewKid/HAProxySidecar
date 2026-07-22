@@ -19,6 +19,7 @@ def test_mcp_sidecar_dockerfile_installs_mcp_dependency() -> None:
     dockerfile = _DOCKERFILE_PATH.read_text(encoding="utf-8")
 
     assert "python -m pip install --no-cache-dir mcp" in dockerfile
+    assert "pymysql" in dockerfile
 
 
 def test_mcp_sidecar_dockerfile_copies_package_source() -> None:

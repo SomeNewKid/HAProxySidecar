@@ -13,6 +13,7 @@ from mcp_sidecar.cli import _parse_arguments
 from mcp_sidecar.resources import ANSWER_FORMAT_RESOURCE_URI, get_answer_format
 from mcp_sidecar.server import create_mcp_server
 from mcp_sidecar.tools import (
+    get_active_items,
     get_html_element_name,
     jina_read_url,
     microsoft_code_sample_search,
@@ -61,6 +62,148 @@ def test_get_answer_format_writes_audit_record(
     assert records[0]["arguments"] == {}
     assert records[0]["success"] is True
     assert "## Recommended Approach" in str(records[0]["result_preview"])
+
+
+@pytest.mark.anyio
+async def test_get_active_items_queries_mariadb_and_returns_json(
+    monkeypatch,
+) -> None:
+    """Verify active items are fetched from MariaDB through configured env."""
+    connections = []
+
+    class FakeCursor:
+        def __enter__(self) -> FakeCursor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            _ = args
+
+        def execute(self, query: str) -> None:
+            connections.append({"query": query})
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": 2,
+                    "item_key": "bravo",
+                    "title": "Bravo test item",
+                    "status": "active",
+                    "notes": "Seed record for update tests.",
+                    "quantity": 2,
+                    "created_at": "2026-07-07 16:08:35",
+                    "updated_at": "2026-07-07 16:08:35",
+                }
+            ]
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def close(self) -> None:
+            connections.append({"closed": True})
+
+    def fake_connect(settings: dict[str, object]) -> FakeConnection:
+        connections.append(settings)
+        return FakeConnection()
+
+    monkeypatch.setenv("MARIADB_HOST", "haproxy-sidecar")
+    monkeypatch.setenv("MARIADB_PORT", "3306")
+    monkeypatch.setenv("MARIADB_DATABASE", "agent_allowed")
+    monkeypatch.setenv(
+        "SANDBOX_TESTER_MARIADB_CREDENTIALS",
+        "sandbox_tester,secret",
+    )
+    monkeypatch.setattr("mcp_sidecar.tools._connect_to_mariadb", fake_connect)
+
+    result = await get_active_items()
+
+    assert json.loads(result) == [
+        {
+            "id": 2,
+            "item_key": "bravo",
+            "title": "Bravo test item",
+            "status": "active",
+            "notes": "Seed record for update tests.",
+            "quantity": 2,
+            "created_at": "2026-07-07 16:08:35",
+            "updated_at": "2026-07-07 16:08:35",
+        }
+    ]
+    assert connections[0] == {
+        "host": "haproxy-sidecar",
+        "port": 3306,
+        "user": "sandbox_tester",
+        "password": "secret",
+        "database": "agent_allowed",
+    }
+    assert "WHERE status = 'active'" in str(connections[1]["query"])
+    assert "ORDER BY id" in str(connections[1]["query"])
+    assert connections[2] == {"closed": True}
+
+
+@pytest.mark.anyio
+async def test_get_active_items_writes_audit_record(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify active item reads are audited without credentials."""
+    audit_log_path = tmp_path / "mcp-sidecar-tool-calls.jsonl"
+
+    def fake_get_active_items_sync() -> str:
+        return '[{"id": 2, "status": "active"}]'
+
+    monkeypatch.setenv("MCP_SIDECAR_AUDIT_LOG_PATH", str(audit_log_path))
+    monkeypatch.setenv("MARIADB_HOST", "haproxy-sidecar")
+    monkeypatch.setenv("MARIADB_PORT", "3306")
+    monkeypatch.setenv("MARIADB_DATABASE", "agent_allowed")
+    monkeypatch.setenv(
+        "SANDBOX_TESTER_MARIADB_CREDENTIALS",
+        "sandbox_tester,secret",
+    )
+    monkeypatch.setattr(
+        "mcp_sidecar.tools._get_active_items_sync",
+        fake_get_active_items_sync,
+    )
+
+    assert await get_active_items() == '[{"id": 2, "status": "active"}]'
+
+    records = _read_jsonl(audit_log_path)
+    assert records[0]["tool"] == "get_active_items"
+    assert records[0]["arguments"] == {
+        "host": "haproxy-sidecar",
+        "port": "3306",
+        "database": "agent_allowed",
+    }
+    assert records[0]["success"] is True
+    assert "secret" not in json.dumps(records[0])
+
+
+@pytest.mark.anyio
+async def test_get_active_items_requires_credentials(monkeypatch) -> None:
+    """Verify MariaDB credentials must be supplied by the host environment."""
+    monkeypatch.delenv("SANDBOX_TESTER_MARIADB_CREDENTIALS", raising=False)
+
+    with pytest.raises(RuntimeError, match="is not configured"):
+        await get_active_items()
+
+
+@pytest.mark.anyio
+async def test_get_active_items_rejects_malformed_credentials(monkeypatch) -> None:
+    """Verify credentials must use the shared sandbox tester format."""
+    monkeypatch.setenv("SANDBOX_TESTER_MARIADB_CREDENTIALS", "sandbox_tester.secret")
+
+    with pytest.raises(RuntimeError, match="username,password"):
+        await get_active_items()
+
+
+@pytest.mark.anyio
+async def test_get_active_items_rejects_invalid_port(monkeypatch) -> None:
+    """Verify MariaDB port values are validated before connection."""
+    monkeypatch.setenv("SANDBOX_TESTER_MARIADB_CREDENTIALS", "sandbox_tester,secret")
+    monkeypatch.setenv("MARIADB_PORT", "not-a-port")
+
+    with pytest.raises(RuntimeError, match="MARIADB_PORT"):
+        await get_active_items()
 
 
 @pytest.mark.anyio
@@ -321,6 +464,27 @@ async def test_mcp_server_exposes_html_element_tool() -> None:
     assert "get_html_element_name" in tool_names
     assert content_blocks[0].text == "<table>"
     assert structured_content == {"result": "<table>"}
+
+
+def test_mcp_server_exposes_get_active_items_tool() -> None:
+    """Verify the sidecar can expose the active items database tool."""
+    server = create_mcp_server(tool_names=("get_active_items",))
+
+    tools = anyio.run(server.list_tools)
+    tool_names = {tool.name for tool in tools}
+
+    assert "get_active_items" in tool_names
+
+
+def test_mcp_server_omits_get_active_items_when_not_declared() -> None:
+    """Verify active item access is not exposed unless configured."""
+    server = create_mcp_server(tool_names=("get_html_element_name",))
+
+    tools = anyio.run(server.list_tools)
+    tool_names = {tool.name for tool in tools}
+
+    assert "get_html_element_name" in tool_names
+    assert "get_active_items" not in tool_names
 
 
 @pytest.mark.anyio

@@ -5,6 +5,7 @@ from __future__ import annotations
 from agents import function_tool
 
 from .tools import (
+    get_active_items,
     get_answer_format,
     get_html_element_name,
     jina_read_url,
@@ -18,6 +19,7 @@ from .tools import (
 )
 
 get_answer_format_tool = function_tool(get_answer_format)
+get_active_items_tool = function_tool(get_active_items)
 get_html_element_name_tool = function_tool(get_html_element_name)
 jina_read_url_tool = function_tool(jina_read_url)
 microsoft_code_sample_search_tool = function_tool(microsoft_code_sample_search)
