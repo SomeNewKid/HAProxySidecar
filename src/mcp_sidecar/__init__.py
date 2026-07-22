@@ -1,0 +1,1 @@
+"""MCP sidecar server package."""
